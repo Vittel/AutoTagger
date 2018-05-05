@@ -11,10 +11,10 @@
 
     public class MysqlUIStorage : MysqlBaseStorage, IAutoTaggerStorage
     {
-        public (string debug, IEnumerable<string> htags) FindHumanoidTags(List<string> machineTags)
+        public (string debug, IEnumerable<string> htags) FindHumanoidTags(List<IMTag> machineTags)
         {
             var htags = new List<string>();
-            machineTags.RemoveAll(x => x.StartsWith("no "));
+            //machineTags.RemoveAll(x => x.Name.StartsWith("no "));
             var query = BuildQuery(machineTags);
 
             using (var command = this.db.Database.GetDbConnection().CreateCommand())
@@ -37,31 +37,37 @@
             return (query, htags);
         }
 
-        private string BuildQuery(IEnumerable<string> machineTags)
+        private string BuildQuery(IEnumerable<IMTag> machineTags)
         {
             var limitTopPhotos    = 100;
-            var countTagsToReturn = 20;
-            var whereCondition = BuildWhereCondition(machineTags);
+            var countTagsToReturn = 30;
+            var whereConditionLabel = BuildWhereCondition(machineTags, "GCPVision_Label");
+            var whereConditionWeb = BuildWhereCondition(machineTags, "GCPVision_Web");
 
-            string query = $"SELECT i.name "
-                         + $"FROM itags as i LEFT JOIN photo_itag_rel as rel ON rel.itagId = i.id "
-                         + $"LEFT JOIN ( SELECT p.id, count(m.name) as matches FROM photos as p "
-                         + $"LEFT JOIN mtags as m ON m.photoId = p.id "
-                         + $"WHERE {whereCondition} GROUP BY p.id ORDER BY matches DESC LIMIT {limitTopPhotos} "
-                         + $") as sub2 ON sub2.id = rel.photoId WHERE sub2.id IS NOT NULL "
-                         + $"GROUP BY i.name ORDER by sum(matches) DESC LIMIT {countTagsToReturn}";
+            var query = $"SELECT i.name "
+                        + $"FROM itags as i LEFT JOIN photo_itag_rel as rel ON rel.itagId = i.id "
+                        + $"LEFT JOIN ( SELECT p.id, count(m.name) as matches FROM photos as p "
+                        + $"LEFT JOIN mtags as m ON m.photoId = p.id "
+                        + $"WHERE "
+                        + $"(({whereConditionLabel}) AND m.source='GCPVision_Label')"
+                        + $"OR (({whereConditionWeb}) AND m.source='GCPVision_Web')"
+                        + $" GROUP BY p.id ORDER BY matches DESC LIMIT {limitTopPhotos} "
+                        + $") as sub2 ON sub2.id = rel.photoId WHERE sub2.id IS NOT NULL "
+                        + $"GROUP BY i.name ORDER by sum(matches) DESC LIMIT {countTagsToReturn}";
 
             return query;
         }
 
-        private static string BuildWhereCondition(IEnumerable<string> machineTags)
+        private static string BuildWhereCondition(IEnumerable<IMTag> machineTags, string source)
         {
             var whereCondition = "";
             foreach (var machineTag in machineTags)
             {
-                if (string.IsNullOrEmpty(machineTag))
+                if (machineTag.Source != source)
                     continue;
-                whereCondition += $"`m`.`name` = '{machineTag}' OR ";
+                if (string.IsNullOrEmpty(machineTag.Name))
+                    continue;
+                whereCondition += $"`m`.`name` = '{machineTag.Name}' OR ";
             }
 
             char[] charsToTrim = { ' ', 'O', 'R' };

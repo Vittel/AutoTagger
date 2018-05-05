@@ -2,7 +2,7 @@
 using System.Collections.Generic;
 using System.Text;
 
-namespace AutoTagger.Clarifai.Standard
+namespace AutoTagger.ImageProcessor.Standard
 {
     using System.Collections.Concurrent;
     using System.Linq;
@@ -15,16 +15,21 @@ namespace AutoTagger.Clarifai.Standard
         private static IImageProcessorStorage storage;
         private static ITaggingProvider tagger;
         private static ConcurrentQueue<IImage> queue;
+        private static ConcurrentQueue<IImage> dbSaveSueue;
         public static Action<IImage> OnLookingForTags;
         public static Action<IImage> OnFoundTags;
         public static Action<IImage> OnDbInserted;
         public static Action OnDbSleep;
         public static Action OnDbSaved;
         private static int taggerRunning = 0;
-        private static readonly int RequestOfSameIDsLimit = 5;
-        private static readonly int ConcurrentClarifaiThreadsLimit = 15;
-        private static readonly int SaveLimit = 5;
-        private static int SaveCounter = 0;
+        private static int saveCounter = 0;
+        private static readonly Random random = new Random();
+
+        private static readonly int FillQueueLimit = 2;
+        private static readonly int ConcurrentClarifaiThreadsLimit = 5;
+        private static readonly int DbSelectImagesAmount = 100;
+        private static readonly int SaveLimit = 3;
+
         enum DbUsage
         {
             None,
@@ -33,10 +38,11 @@ namespace AutoTagger.Clarifai.Standard
         }
         private static DbUsage currentDbUsage;
 
-        public ImageProcessorApp(IImageProcessorStorage db)
+        public ImageProcessorApp(IImageProcessorStorage db, ITaggingProvider taggingProvider)
         {
             storage = db;
-            tagger = new ClarifaiImageTagger();
+            tagger = taggingProvider;
+            dbSaveSueue = new ConcurrentQueue<IImage>();
             queue = new ConcurrentQueue<IImage>();
         }
 
@@ -48,30 +54,47 @@ namespace AutoTagger.Clarifai.Standard
 
         private static void StartTagger()
         {
-            var taggerThread = new Thread(ImageProcessorApp.TaggerThread);
-            taggerThread.Start();
+            new Thread(ImageProcessorApp.FillQueueThread).Start();
+            new Thread(ImageProcessorApp.StartTaggerThreads).Start();
         }
 
-        private static void TaggerThread()
+        private static void FillQueueThread()
+        {
+            var lastId = 0;
+            while (true)
+            {
+                if (queue.Count <= FillQueueLimit && SetDbUsing(DbUsage.GetEntries))
+                {
+                    var images = storage.GetImagesWithoutMachineTags(lastId, DbSelectImagesAmount);
+                    foreach (var image in images)
+                    {
+                        queue.Enqueue(image);
+                        lastId = image.Id;
+                    }
+                    currentDbUsage = DbUsage.None;
+                }
+                Thread.Sleep(random.Next(50, 150));
+            }
+        }
+
+        private static void StartTaggerThreads()
         {
             while (true)
             {
-                if (taggerRunning < ConcurrentClarifaiThreadsLimit && SetDbUsing(DbUsage.GetEntries))
+                for (var i = taggerRunning; i < ConcurrentClarifaiThreadsLimit;i++)
                 {
-                    var images = storage.GetImagesWithoutMachineTags(RequestOfSameIDsLimit);
-                    currentDbUsage = DbUsage.None;
-                    foreach (var image in images)
+                    if(queue.TryDequeue(out IImage image))
                     {
                         Interlocked.Increment(ref taggerRunning);
-                        var clarifaiThread = new Thread(ImageProcessorApp.GetData);
-                        clarifaiThread.Start(image);
+                        var taggerThread = new Thread(DoTaggerRequest);
+                        taggerThread.Start(image);
+                    }
+                    else
+                    {
+                        break;
                     }
                 }
-                else
-                {
-                    var r = new Random();
-                    Thread.Sleep(r.Next(50, 150));
-                }
+                Thread.Sleep(random.Next(50, 150));
             }
         }
 
@@ -91,17 +114,17 @@ namespace AutoTagger.Clarifai.Standard
             dbTread.Start();
         }
 
-        public static void GetData(object data)
+        public static void DoTaggerRequest(object data)
         {
-            IImage image = (IImage)data;
+            var image = (IImage)data;
             OnLookingForTags?.Invoke(image);
             var mTags = tagger.GetTagsForImageUrl(image.LargeUrl).ToList();
             Interlocked.Decrement(ref taggerRunning);
             if (mTags.Count == 0)
                 return;
             image.MachineTags = mTags;
-            queue.Enqueue(image);
-            Interlocked.Increment(ref SaveCounter);
+            dbSaveSueue.Enqueue(image);
+            Interlocked.Increment(ref saveCounter);
             OnFoundTags?.Invoke(image);
         }
 
@@ -109,16 +132,16 @@ namespace AutoTagger.Clarifai.Standard
         {
             while (true)
             {
-                if (SaveCounter >= SaveLimit && SetDbUsing(DbUsage.SaveThisFuckingShit))
+                if (saveCounter >= SaveLimit && SetDbUsing(DbUsage.SaveThisFuckingShit))
                 {
-                    while (queue.TryDequeue(out IImage image))
+                    while (dbSaveSueue.TryDequeue(out IImage image))
                     {
                         storage.InsertMachineTagsWithoutSaving(image);
                         OnDbInserted?.Invoke(image);
                     }
                     storage.DoSave();
                     OnDbSaved?.Invoke();
-                    SaveCounter = 0;
+                    saveCounter = 0;
                     currentDbUsage = DbUsage.None;
                 }
                 else

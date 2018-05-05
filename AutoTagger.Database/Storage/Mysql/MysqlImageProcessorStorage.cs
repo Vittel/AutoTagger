@@ -25,6 +25,15 @@
             return query.ToList().Select(x => x.ToImage());
         }
 
+        public IEnumerable<IImage> GetImagesWithoutMachineTags(int idLargerThan, int limit)
+        {
+            var query = (from p in this.db.Photos
+                         where p.Mtags.Count == 0
+                            && p.Id > idLargerThan
+                         select p).Take(limit);
+            return query.ToList().Select(x => x.ToImage());
+        }
+
         private int GetRandomId()
         {
             var largestId = this.GetLargestId();
@@ -38,9 +47,15 @@
 
         public void InsertMachineTagsWithoutSaving(IImage image)
         {
-            foreach (var mTagName in image.MachineTags)
+            foreach (var mTag in image.MachineTags)
             {
-                this.db.Mtags.Add(new Mtags { Name = mTagName, PhotoId = image.Id });
+                this.db.Mtags.Add(new Mtags {
+                    Name = mTag.Name,
+                    Score = mTag.Score,
+                    Source = mTag.Source,
+                    PhotoId = image.Id
+
+                });
             }
         }
 
